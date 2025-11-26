@@ -1,0 +1,127 @@
+name: shenyu-benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - benchmark/**
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  benchmark:
+    name: Run ShenYu Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      # ---------------------------------------
+      #  Check out ShenYu repo
+      # ---------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      # ---------------------------------------
+      #  Warm Maven cache
+      # ---------------------------------------
+      - name: Restore Maven Repo Cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2/repository
+          key: benchmark-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            benchmark-m2-
+
+      # ---------------------------------------
+      #  Install Java 17
+      # ---------------------------------------
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: temurin
+
+      # ---------------------------------------
+      #  Install mvnd
+      # ---------------------------------------
+      - name: Install mvnd
+        run: |
+          curl -sL https://downloads.apache.org/maven/mvnd/1.0.2/maven-mvnd-1.0.2-linux-amd64.zip -o mvnd.zip
+          unzip -q mvnd.zip
+          mkdir -p $HOME/.local
+          mv maven-mvnd-1.0.2-linux-amd64 $HOME/.local/mvnd
+          echo "$HOME/.local/mvnd/bin" >> $GITHUB_PATH
+          echo "MVND_HOME=$HOME/.local/mvnd" >> $GITHUB_ENV
+
+      # ---------------------------------------
+      #  Prepare benchmark folder
+      # ---------------------------------------
+      - name: Prepare benchmark output
+        run: mkdir -p benchmark
+
+      # ---------------------------------------
+      # BENCHMARK: CI BUILD (ci.yml equivalent)
+      # ---------------------------------------
+      - name: Benchmark CI Build
+        run: |
+          echo "Running CI Build Benchmark..."
+          /usr/bin/time -v mvnd -B clean test -Prelease \
+            2> benchmark/ci-build.txt
+
+      # ---------------------------------------
+      # BENCHMARK: E2E BUILD + IMAGE + KIND CLUSTER
+      # ---------------------------------------
+      - name: Install kind + kubectl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+          curl -Lo kind https://kind.sigs.k8s.io/dl/v0.17.0/kind-linux-amd64
+          chmod +x kind && sudo mv kind /usr/local/bin
+          curl -LO https://storage.googleapis.com/kubernetes-release/release/v1.24.14/bin/linux/amd64/kubectl
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin
+
+      - name: Benchmark E2E Build
+        run: |
+          echo "Running E2E Build Benchmark..."
+          /usr/bin/time -v mvnd -B clean install -Prelease,docker \
+            -Dmaven.javadoc.skip=true -DskipTests \
+            2> benchmark/e2e-build.txt
+
+      - name: Benchmark Kind Cluster Startup
+        run: |
+          echo "Creating kind cluster..."
+          /usr/bin/time -v kind create cluster \
+            --image=kindest/node:v1.21.1 \
+            2> benchmark/kind-start.txt
+
+      # ---------------------------------------
+      # BENCHMARK: E2E Tests
+      # ---------------------------------------
+      - name: Benchmark E2E Tests
+        run: |
+          /usr/bin/time -v mvnd test -Pit -f ./shenyu-e2e/pom.xml \
+            2> benchmark/e2e-tests.txt
+
+      # ---------------------------------------
+      #  Upload benchmark results as artifacts
+      # ---------------------------------------
+      - name: Upload Benchmark Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: shenyu-benchmark-results
+          path: benchmark/
+
+      # ---------------------------------------
+      #  Publish to GitHub Pages (optional)
+      # ---------------------------------------
+      - name: Store Benchmark History
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: shenyu-ci-e2e-benchmark
+          tool: 'customBiggerIsBetter'
+          output-file-path: benchmark/ci-build.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          save-data-file: true
